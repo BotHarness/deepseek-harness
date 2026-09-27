@@ -20,6 +20,33 @@ Desktop microphone access is restricted to audio requests from the primary `dsh-
 
 Press F12 (Fn+F12 on media-key keyboards), Command+Option+I on macOS, or Ctrl+Shift+I on Windows to toggle DevTools for the focused application page, including in packaged builds. These native shortcuts use hidden application-menu items. Update overlays and packaged embedded browser guests disable DevTools.
 
+## Contributed windows
+
+A plugin can contribute an independent desktop window through the `desktopWindows` Host service, provided by the Desktop Host. The Host declares; the shell creates and owns the window. There is no plugin access to Electron window APIs and no second manifest format: the contribution is an ordinary Cordis service call.
+
+```ts
+export const inject = ['desktopWindows']
+
+export function apply(ctx: Context) {
+  ctx.effect(() => ctx.desktopWindows.open({
+    id: 'companion-window',
+    surface: 'dsh-companion-example',
+    width: 260,
+    height: 200,
+    anchor: 'bottom-right',
+    margin: [24, 24],
+    alwaysOnTop: true,
+    transparent: true,
+  }), 'companion: desktop window')
+}
+```
+
+`open(spec)` returns the shell-assigned window id or rejects with the shell's refusal message; `close(id)` closes one window, and every closure is announced as the `desktop-window/closed` Cordis event. A spec carries `id`, `surface`, `width`, `height`, optional `anchor`/`margin`, and the optional flags `alwaysOnTop`, `transparent`, `clickThrough`, `skipTaskbar`, and `resizable`; the shell validates every field and refuses an unknown anchor, a non-integer size, or a ninth window.
+
+The window loads the same Web application document with `?dsh-surface=<surface>` and a dedicated surface preload. Before boot, the client keeps only the surface package's package-name dependency closure, so the window activates its own surface instead of the full UI; a surface plugin shadows the `root` slot to render itself. Contributed windows share the main window's authenticated Host cookie, sandbox, context isolation, and WebSocket admission; renderers receive no Electron APIs, and a failed surface boot is logged without taking the application down. `clickThrough` maps to `setIgnoreMouseEvents(true, { forward: true })`; frameless transparent windows are draggable through the shared `data-window-drag` region.
+
+The service exists only in Desktop compositions. A plugin that also runs under Web injects it optionally (`ctx.inject(['desktopWindows'], ...)`) and keeps a fallback surface, such as the `shell.overlay` slot.
+
 ## Closing the window and quitting
 
 Closing the main window (macOS close button and ⌘W; Windows ×, Alt+F4, and the taskbar Close window command) hides it; Windows asks for acknowledgement before the first hide. The page and the Host keep running, tasks continue, and the next show presents the same document with its session, drafts, and scroll position; a fullscreen macOS window leaves fullscreen before hiding. The window returns through the Dock icon, a second launch, or `dsh://open` on macOS, and through the tray on Windows. Minimize is unchanged. Closing the welcome window before the workspace opens quits on Windows and, on macOS, keeps the application in the Dock without a window.

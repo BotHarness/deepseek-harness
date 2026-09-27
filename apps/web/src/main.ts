@@ -1,6 +1,7 @@
 /** Browser entry for the Web client. */
 import '@deepseek-ai/dsh-client-ui-theme/brand-font.css'
 import { AppWebEntry, applyIndexInjections } from '@deepseek-ai/dsh-client-web'
+import { filterSurfaceInjections } from './surface-boot.ts'
 
 interface DesktopBootGlobal {
   dshDesktopBoot?: {
@@ -9,6 +10,8 @@ interface DesktopBootGlobal {
   }
 }
 const desktop = (globalThis as DesktopBootGlobal).dshDesktopBoot
+/** Contributed windows declare their surface through the shell preload. */
+const surface = (globalThis as { dshSurface?: { id?: string } }).dshSurface?.id
 const reportFailure = (reason: unknown): void => {
   if (desktop === undefined) throw reason
   void desktop.failed(reason instanceof Error ? reason.message : String(reason)).catch(console.error)
@@ -24,7 +27,8 @@ try {
     void desktop.ready().then(async ({ injections, streamBaseUrl }) => {
       const transport = globalThis as { __DSH_TRANSPORT__?: { ownsHost: boolean; streamBaseUrl: string } }
       transport.__DSH_TRANSPORT__ = { ownsHost: true, streamBaseUrl }
-      await applyIndexInjections(injections, src => new Promise<void>((resolve, reject) => {
+      const effective = surface === undefined ? injections : filterSurfaceInjections(injections, surface)
+      await applyIndexInjections(effective, src => new Promise<void>((resolve, reject) => {
         const script = document.createElement('script')
         script.src = src
         script.onload = () => { resolve() }

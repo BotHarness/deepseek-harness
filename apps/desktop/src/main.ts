@@ -50,6 +50,7 @@ import { DesktopPolicyTestAuth } from './policy-test-auth.ts'
 import { DesktopUpdateDialog, type UpdateDialogOptions } from './update-dialog.ts'
 import { readDesktopRuntime } from './runtime-tree.ts'
 import { DesktopBrowserGuests } from './browser-guests.ts'
+import { DesktopWindowContributions } from './window-contributions.ts'
 import { installDesktopShortcuts } from './keyboard.ts'
 import { DesktopUpdateOverlays } from './update-overlay.ts'
 import { DesktopQuitConfirmation } from './quit-confirmation.ts'
@@ -370,6 +371,7 @@ async function main(): Promise<void> {
       buttons: [locale.messages.updateAcknowledge], cancelId: 0 })
   }
   const appPreload = fileURLToPath(new URL('./preload-app.cjs', import.meta.url))
+  const surfacePreload = fileURLToPath(new URL('./preload-surface.cjs', import.meta.url))
   const applicationUrl = `${SCHEME}://app/`
   let hostUrl: string | undefined
   let hostCookie: string | undefined
@@ -405,12 +407,17 @@ async function main(): Promise<void> {
   }
   const platformView = new DesktopPlatformView(join(app.getAppPath(), 'lib', 'preload-platform-account.cjs'),
     () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US', process.platform === 'win32' ? 'win32' : 'darwin')
+  // Contributed windows are shell-owned; the Host only declares them. Closures
+  // report back to the live Host when one exists.
+  const windowContributions = new DesktopWindowContributions(surfacePreload, applicationUrl,
+    (windowId) => { backend.host?.notifyWindowClosed(windowId) })
   const backend = new DesktopBackendController((onFailure) => {
     const hostInspectPort = developmentHostInspectPort(development)
     const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject,
       hostInspectPort, process.env, onFailure,
       primaryRuntime,
-      resources, (next) => { platformView.setSession(next) })
+      resources, (next) => { platformView.setSession(next) },
+      (request, respond) => { windowContributions.handleHostMessage(request, respond) })
     return {
       start: async () => {
         const ready = await host.start()
@@ -468,6 +475,7 @@ async function main(): Promise<void> {
       },
       updateTasks: (action: 'inspect' | 'lock' | 'unlock') => host.updateTasks(action),
       inspectQuit: () => host.inspectQuit(),
+      notifyWindowClosed: (windowId: string) => { host.notifyWindowClosed(windowId) },
     }
   }, (state) => {
     if (state.phase === 'error') reportFatal(state.failure, 'host')
@@ -646,10 +654,15 @@ async function main(): Promise<void> {
 
   ipcMain.handle(DESKTOP_IPC.bootFailed, (event, message: unknown) => {
     assertDesktopSender(event, ['app'])
+    if (typeof message !== 'string') throw new Error('dsh desktop: startup failure must be text')
     if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) {
+      // A contributed window reports its own boot failure; it must not take the application down.
+      if (windowContributions.ownsWebContents(event.sender.id)) {
+        console.error('desktop surface: boot failed', message)
+        return
+      }
       throw new Error('dsh desktop: rejected startup failure from a non-primary frame')
     }
-    if (typeof message !== 'string') throw new Error('dsh desktop: startup failure must be text')
     reportFatal(new Error(message), 'web-boot')
   })
 
@@ -663,7 +676,9 @@ async function main(): Promise<void> {
   })
 
   session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ['ws://127.0.0.1/*'] }, (details, callback) => {
-    if (hostUrl === undefined || hostCookie === undefined || details.webContentsId !== mainWindow?.webContents.id) {
+    const owned = details.webContentsId !== undefined
+      && (details.webContentsId === mainWindow?.webContents.id || windowContributions.ownsWebContents(details.webContentsId))
+    if (hostUrl === undefined || hostCookie === undefined || !owned) {
       callback({})
       return
     }
@@ -1192,6 +1207,7 @@ async function main(): Promise<void> {
     stopAccount?.()
     if (welcomeWindow !== undefined && !welcomeWindow.isDestroyed()) welcomeWindow.hide()
     if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.hide()
+    windowContributions.closeAll()
     updateSchedule.dispose()
     updateDialog.dispose()
     mandatoryUI?.dispose()

@@ -20,6 +20,33 @@ Desktop Host 的 Platform API 请求与更新策略请求用相同的 Platform �
 
 按 F12（多媒体功能键键盘上为 Fn+F12）、macOS 的 Command+Option+I 或 Windows 的 Ctrl+Shift+I，可切换当前获得焦点的应用页面的 DevTools，打包版本同样支持。这些原生快捷键通过隐藏的应用菜单项注册。更新遮罩和打包版本的内嵌浏览器禁用 DevTools。
 
+## 贡献窗口
+
+插件可以通过 Desktop Host 提供的 `desktopWindows` 服务贡献独立桌面窗口。Host 只做声明，窗口由 shell 创建并持有：插件接触不到 Electron 窗口 API，也不需要新的 manifest 格式，贡献就是一次普通的 Cordis 服务调用。
+
+```ts
+export const inject = ['desktopWindows']
+
+export function apply(ctx: Context) {
+  ctx.effect(() => ctx.desktopWindows.open({
+    id: 'companion-window',
+    surface: 'dsh-companion-example',
+    width: 260,
+    height: 200,
+    anchor: 'bottom-right',
+    margin: [24, 24],
+    alwaysOnTop: true,
+    transparent: true,
+  }), 'companion: desktop window')
+}
+```
+
+`open(spec)` 返回 shell 分配的窗口 id，失败时以 shell 的拒绝原因 reject；`close(id)` 关闭一个窗口，每次关闭都会以 `desktop-window/closed` Cordis 事件广播。spec 包含 `id`、`surface`、`width`、`height`，可选 `anchor`/`margin`，以及可选开关 `alwaysOnTop`、`transparent`、`clickThrough`、`skipTaskbar`、`resizable`；shell 校验每个字段，拒绝未知锚点、非整数尺寸或第 9 个窗口。
+
+窗口用同一个 Web 应用文档加载，带 `?dsh-surface=<surface>` 与专用的 surface preload。启动前客户端只保留 surface 包的包名依赖闭包，因此窗口只激活自己的 surface 而不是整套 UI；surface 插件通过 shadow `root` slot 渲染自己。贡献窗口与主窗口共享已认证的 Host cookie、sandbox、context isolation 与 WebSocket 准入；renderer 依旧拿不到 Electron API，surface 启动失败只记录日志、不拖垮应用。`clickThrough` 映射到 `setIgnoreMouseEvents(true, { forward: true })`；无边框透明窗口通过共享的 `data-window-drag` 区域拖动。
+
+该服务只存在于 Desktop 组合中。同时在 Web 下运行的插件用可选注入（`ctx.inject(['desktopWindows'], ...)`）消费它，并保留一个回退 surface（例如 `shell.overlay` slot）。
+
 ## 关闭窗口与退出
 
 关闭主窗口（macOS 的关闭按钮和 ⌘W；Windows 的 ×、Alt+F4 和任务栏"关闭窗口"）会隐藏窗口；Windows 首次隐藏前需要确认。页面和 Host 继续运行，任务不受影响，下次显示时仍是原来的文档，会话、草稿和滚动位置都保留；macOS 全屏窗口先退出全屏再隐藏。macOS 通过 Dock 图标、再次启动或 `dsh://open` 找回窗口，Windows 通过托盘找回。最小化行为不变。进入工作区前关闭欢迎窗口，Windows 上走退出流程，macOS 上应用留在 Dock 中且没有窗口。

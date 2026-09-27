@@ -34,7 +34,12 @@ type DesktopHostEvent = ReadyEvent | FatalEvent | PlatformSessionEvent | { reado
   readonly activeTasks: boolean
   readonly scheduledTasks: boolean
   readonly error?: string
-}
+} | DesktopWindowRequest
+
+/** Host requests the shell to open or close one contributed window. */
+export type DesktopWindowRequest =
+  | { readonly type: 'window-open'; readonly requestId: number; readonly spec: unknown }
+  | { readonly type: 'window-close'; readonly requestId: number; readonly windowId: string }
 
 /** Correlated answer to one shell control request. */
 type DesktopHostControlResponse = Extract<DesktopHostEvent, { readonly requestId: number }>
@@ -85,6 +90,10 @@ function isDesktopHostEvent(message: unknown): message is DesktopHostEvent {
     case 'quit-inspection':
       return Number.isSafeInteger(candidate.requestId) && typeof candidate.activeTasks === 'boolean'
         && typeof candidate.scheduledTasks === 'boolean' && (candidate.error === undefined || typeof candidate.error === 'string')
+    case 'window-open':
+      return Number.isSafeInteger(candidate.requestId) && typeof candidate.spec === 'object' && candidate.spec !== null
+    case 'window-close':
+      return Number.isSafeInteger(candidate.requestId) && typeof candidate.windowId === 'string'
     default:
       return false
   }
@@ -165,6 +174,7 @@ export class DesktopHostProcess {
    *   `office-skills` resources fail Host startup.
    * @param packageManager - Bundled pnpm entry and Node launcher directory, scoped to package operations.
    * @param onPlatformSession - Private credential updates for embedded Platform views.
+   * @param onWindowRequest - Contributed-window requests; the callback answers over the same channel.
    */
   constructor(
     private readonly node: string,
@@ -177,6 +187,7 @@ export class DesktopHostProcess {
     private readonly packageManager?: { readonly pnpm: string; readonly nodeBin: string },
 
     private readonly onPlatformSession?: (session: PlatformSession | null) => void,
+    private readonly onWindowRequest?: (request: DesktopWindowRequest, respond: (reply: object) => void) => void,
   ) {}
 
   /**
@@ -216,6 +227,9 @@ export class DesktopHostProcess {
         else this.fail(new Error('dsh desktop host acknowledged an unrequested shutdown'))
       }
       else if (message.type === 'fatal') this.fail(new DesktopHostFatalError(message.message, message.diagnostic))
+      else if (message.type === 'window-open' || message.type === 'window-close') {
+        this.onWindowRequest?.(message, (reply) => { if (child.connected) child.send(reply) })
+      }
       else {
         const request = this.controlRequests.get(message.requestId)
         if (message.error === undefined) request?.resolve(message)
@@ -255,6 +269,16 @@ export class DesktopHostProcess {
     const response = await this.control({ type: 'quit-inspection' }, QUIT_INSPECTION_DEADLINE_MS, 'desktop quit: inspection timed out')
     if (response.type !== 'quit-inspection') throw new Error('desktop quit: Host answered with a different control response')
     return { activeTasks: response.activeTasks, scheduledTasks: response.scheduledTasks }
+  }
+
+  /**
+   * Tell the Host one contributed window closed in the shell.
+   * @param windowId - the id the shell returned when the window opened.
+   */
+  notifyWindowClosed(windowId: string): void {
+    const child = this.child
+    if (child === undefined || !child.connected) return
+    child.send({ type: 'window-closed', windowId })
   }
 
   private async control(
